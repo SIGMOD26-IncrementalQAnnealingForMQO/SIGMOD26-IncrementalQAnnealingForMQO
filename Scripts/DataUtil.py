@@ -1,13 +1,8 @@
-#!/usr/bin/env python
-# coding: utf-8
-
-# In[ ]:
 
 
 import numpy as np
 import json
 import os
-import pickle
 import pathlib
 import itertools
 import gzip

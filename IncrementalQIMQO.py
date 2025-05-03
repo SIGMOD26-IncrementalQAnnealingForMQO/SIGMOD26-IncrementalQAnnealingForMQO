@@ -7,22 +7,15 @@
 import numpy as np
 import json
 import os
-import pickle
 import pathlib
 import itertools
 
 import Scripts.MQOQUBOGenerator as MQOQUBOGenerator
-import Scripts.MQOProblemGenerator as MQOProblemGenerator
-import Scripts.BenchmarkProblemGenerator as BenchmarkProblemGenerator
 
-import Scripts.PartitioningQUBOGenerator as PartitioningQUBOGenerator
 import Scripts.DataExport as DataExport
 import Scripts.DataUtil as DataUtil
-import Scripts.DWaveUtil as DWaveUtil
 import time
 from math import inf
-import neal
-import dimod
 
 # In[2]:
 
@@ -33,13 +26,9 @@ def get_name_for_solver_settings(solver_settings):
     elif solver_settings["solver"] == 'SA':
         return "SA_it_" + str(solver_settings["number_iterations"]) + '_npart_' + str(solver_settings["num_partitioning_phases"])
     elif solver_settings["solver"] == 'DWave_Hybrid':
-        return "DWave_Hybrid_tl" + str(solver_settings["time_limit"]) + '_npart_' + str(solver_settings["num_partitioning_phases"])
-    elif solver_settings["solver"] == 'SQA':
-        return "SQA_it_" + str(solver_settings["n_steps"]) + '_npart_' + str(solver_settings["num_partitioning_phases"])
-    elif solver_settings["solver"] == 'VA':
-        return "VA_mode_" + solver_settings["vector_mode"] + "_it_" + str(solver_settings["num_sweeps"]) + '_npart_' + str(solver_settings["num_partitioning_phases"])
+        return "DWave_Hybrid_npart_" + str(solver_settings["num_partitioning_phases"])
     else:
-        return ""
+        return ""    
     
 def export_result(plan_configuration, costs, solution_time, solver_settings, result_path):
     solution_time_in_ms = solution_time*1000
@@ -75,30 +64,18 @@ def evaluate_mqo_solution(active_plans, plan_costs, savings_matrix, num_og_plans
     return costs - active_savings
 
 
+
 def generate_partitioning_encoding_with_qubo_matrix(qubo_matrix, solver_settings):
     if solver_settings["solver"] == "DA":
         from dadk.BinPol import BinPol
         partitioning_encoding = BinPol(qubo_matrix_array=qubo_matrix)
     elif solver_settings["solver"] == "SA":
+        import dimod
         partitioning_encoding = dimod.BinaryQuadraticModel(qubo_matrix, 'BINARY')
     elif solver_settings["solver"] == "DWave_Hybrid":
+        import dimod
         partitioning_encoding = dimod.BinaryQuadraticModel(qubo_matrix, 'BINARY')
-    elif solver_settings["solver"] == "SQA":
-        from qat.opt import QUBO
-        partitioning_encoding = QUBO(Q=qubo_matrix)
-    elif solver_settings["solver"] == "VA":
-        import VectorAnnealing
-        qubo = {}
-        num_vars = len(qubo_matrix)
-        for i in range(num_vars):
-            for j in range(num_vars):
-                if j < i:
-                    continue
-                if qubo_matrix[i][j] != 0:
-                    qubo[(str(i), str(j))] = float(qubo_matrix[i][j])
-        partitioning_encoding = VectorAnnealing.model(qubo, 0)
-    return partitioning_encoding
-
+    return partitioning_encoding    
 
 def generate_MQO_encoding_with_matrix(p_queries, p_plan_costs, p_savings_matrix, wl, wm, solver_settings):
     if solver_settings["solver"] == "DA":
@@ -107,10 +84,6 @@ def generate_MQO_encoding_with_matrix(p_queries, p_plan_costs, p_savings_matrix,
         mqo_encoding = MQOQUBOGenerator.generate_DWave_QUBO_with_matrix(p_queries, p_plan_costs, p_savings_matrix, wl, wm)
     elif solver_settings["solver"] == "DWave_Hybrid":
         mqo_encoding = MQOQUBOGenerator.generate_DWave_QUBO_with_matrix(p_queries, p_plan_costs, p_savings_matrix, wl, wm)
-    elif solver_settings["solver"] == "SQA":
-        mqo_encoding = MQOQUBOGenerator.generate_Qaptiva_QUBO_with_matrix(p_queries, p_plan_costs, p_savings_matrix, wl, wm)
-    elif solver_settings["solver"] == "VA":
-        mqo_encoding = MQOQUBOGenerator.generate_NEC_QUBO_with_matrix(p_queries, p_plan_costs, p_savings_matrix, wl, wm)
     return mqo_encoding
 
 def solve(encoding, solver_settings, time_limit_sec, data_path, filename):
@@ -120,23 +93,14 @@ def solve(encoding, solver_settings, time_limit_sec, data_path, filename):
         return result, opt_time_in_s
     elif solver_settings["solver"] == "SA":
         #result, opt_time_in_ms = solve_problem_sa(encoding, solver_settings)
+        import Scripts.DWaveUtil as DWaveUtil
         result, opt_time_in_s = DWaveUtil.solve_problem_SA(encoding, data_path, filename, solver_settings, time_limit_sec)
         return result, opt_time_in_s
     elif solver_settings["solver"] == "DWave_Hybrid":
+        import Scripts.DWaveUtil as DWaveUtil
         result, opt_time_in_s = DWaveUtil.solve_problem_hybrid_bqm(encoding, data_path, filename, solver_settings)
         return result, opt_time_in_s
-    elif solver_settings["solver"] == "SQA":
-        #result, opt_time_in_ms = solve_problem_sa(encoding, solver_settings)
-        import Scripts.QaptivaUtil as QaptivaUtil
-        result, opt_time_in_s = QaptivaUtil.solve_problem_SQA(encoding, data_path, filename, solver_settings, time_limit_sec)
-        return result, opt_time_in_s
-    elif solver_settings["solver"] == "VA":
-        import Scripts.NECUtil as NECUtil
-        result, opt_time_in_s = NECUtil.solve_problem_VA(encoding, data_path, filename, solver_settings, time_limit_sec)
-        return result, opt_time_in_s
-
-
-
+        
 def get_query_graph(queries, plan_costs, savings_matrix):
     num_queries = len(queries)
     query_graph = np.zeros((num_queries, num_queries))
@@ -151,34 +115,62 @@ def get_query_graph(queries, plan_costs, savings_matrix):
         
     return query_graph
 
-def get_partitioning_QUBO(queries, plan_costs, savings_matrix):
+    
+def get_partitioning_QUBO(queries, plan_costs, savings_matrix, solver_settings, factor=2):
+        
     num_queries = len(queries)
-    qubo = np.zeros((num_queries, num_queries))
+    qubo_a = np.zeros((num_queries, num_queries))
+    qubo_b = np.zeros((num_queries, num_queries))
+    
+    
     query_graph = np.zeros((num_queries, num_queries))
-    savings_coeffs = np.zeros((num_queries, num_queries))
-
+    coefficients_a = np.zeros((num_queries, num_queries))
+    coefficients_b = np.zeros((num_queries, num_queries))
+    
+    max_savings_coeff = 0
+    
     for (query1, plans1) in queries.items():
+        query1 = int(query1)
         acc_savings = np.sum(savings_matrix[:, plans1], axis=1)
-        qubo[int(query1)][int(query1)] = qubo[int(query1)][int(query1)] - (pow(len(plans1), 2) * 4)
         query_graph[int(query1)][int(query1)] = len(plans1)
         for (query2, plans2) in queries.items():
-            if query2 < query1:
+            query2 = int(query2)
+            if query2 <= query1:
                 continue
-            if query1 != query2:
-                query_graph[int(query1)][int(query2)] = np.sum(acc_savings[plans2])
             
             savings_coeff = np.sum(acc_savings[plans2])
-            savings_coeffs[int(query2)][int(query1)] = savings_coeff
+            
+            if savings_coeff > max_savings_coeff:
+                max_savings_coeff = savings_coeff
+            
+            weight = 4*len(plans1)*len(plans2)
+                
+            query_graph[int(query1)][int(query2)] = savings_coeff
+            query_graph[int(query2)][int(query1)] = savings_coeff
+            
+            coefficients_a[int(query1)][int(query2)] = weight * -1
+            coefficients_a[int(query2)][int(query1)] = weight * -1
+            coefficients_b[int(query1)][int(query2)] = savings_coeff
+            coefficients_b[int(query2)][int(query1)] = savings_coeff
 
-            quadr_coeff = 8*len(plans1)*len(plans2) - 2*savings_coeff
-            qubo[int(query1)][int(query2)] = qubo[int(query1)][int(query2)] + quadr_coeff
-            qubo[int(query2)][int(query1)] = qubo[int(query2)][int(query1)] + quadr_coeff
+            qubo_a[int(query1)][int(query2)] = qubo_a[int(query1)][int(query2)] + 2*weight
+            qubo_b[int(query1)][int(query2)] = qubo_b[int(query1)][int(query2)] - 2*savings_coeff
 
-            lin_coeff = (len(plans1)*len(plans2)*4) - savings_coeff
-            qubo[int(query1)][int(query1)] = qubo[int(query1)][int(query1)] - lin_coeff
-            qubo[int(query2)][int(query2)] = qubo[int(query2)][int(query2)] - lin_coeff
+            qubo_a[int(query1)][int(query1)] = qubo_a[int(query1)][int(query1)] - weight
+            qubo_a[int(query2)][int(query2)] = qubo_a[int(query2)][int(query2)] - weight 
+            
+            qubo_b[int(query1)][int(query1)] = qubo_b[int(query1)][int(query1)] + savings_coeff
+            qubo_b[int(query2)][int(query2)] = qubo_b[int(query2)][int(query2)] + savings_coeff
 
-    return qubo, query_graph, savings_coeffs
+    qubo_a = qubo_a * max_savings_coeff
+    qubo = qubo_a + qubo_b
+    
+    coefficients_a = coefficients_a * max_savings_coeff
+    coefficients = coefficients_a + coefficients_b
+    
+    return qubo, query_graph, coefficients
+    
+
 
 def get_split_weight(query_graph, p1, p2):
     split_weight = 0
@@ -187,15 +179,15 @@ def get_split_weight(query_graph, p1, p2):
             split_weight = split_weight + query_graph[q1][q2] 
     return split_weight
 
+def parse_query_graph_for_partition(qubo, partition, unpartitioned_queries, coefficients, query_graph):
 
-
-def parse_query_graph_for_partition(qubo, partition, savings_coeffs, query_graph):
     num_queries = len(partition)
     num_og_queries = len(query_graph)
     org_q_indx_to_p_q_indx = {}
     for i in range(num_queries):
         org_q_indx_to_p_q_indx[partition[i]] = i
-    
+        
+
     p_qubo = np.zeros((num_queries, num_queries))
 
     for q1 in partition:
@@ -206,12 +198,14 @@ def parse_query_graph_for_partition(qubo, partition, savings_coeffs, query_graph
             p_idx_2 = org_q_indx_to_p_q_indx[q2]
             p_qubo[p_idx_1][p_idx_2] = qubo[q1][q2]
             p_qubo[p_idx_2][p_idx_1] = qubo[q2][q1]
- 
+           
             if q1 == q2:
-                difference = sum([savings_coeffs[q1][i] - int(query_graph[q1][q1] * query_graph[i][i] *4) for i in range(num_og_queries) if i not in partition])
+                difference = sum([coefficients[q1][i] for i in unpartitioned_queries if i not in partition])
+                
                 p_qubo[p_idx_1][p_idx_1] = p_qubo[p_idx_1][p_idx_1] - difference
-    return p_qubo
 
+    return p_qubo
+    
 def process_partitioning_qubo_results(query_graph, qubo_results):
     start_time = time.time()
     bitstrings = []
@@ -237,8 +231,31 @@ def process_partitioning_qubo_results(query_graph, qubo_results):
                 best_p1 = p1.copy()
                 best_p2 = p2.copy()
     total_time_in_s = time.time() - start_time
-
     return best_p1, best_p2, total_time_in_s
+    
+def postprocess_partitioning_solutions(part1, part2, query_graph, num_parses=4, min_fraction=0.1):
+
+
+    num_queries = len(part1) + len(part2)
+    min_part1_length = int(min_fraction*num_queries)
+    
+    acc_savings_to_part1 = np.sum(query_graph[part1], axis=0)
+    acc_savings_to_part2 = np.sum(query_graph[part2], axis=0)
+    
+    for i in range(num_parses):
+        for query in part1:
+            if len(part1) == min_part1_length:
+                break
+            if acc_savings_to_part1[query] < acc_savings_to_part2[query]:
+                part2.append(query)
+                part1.remove(query)
+                acc_savings_to_part1 = np.sum(query_graph[part1], axis=0)
+                acc_savings_to_part2 = np.sum(query_graph[part2], axis=0)
+            
+    part1 = sorted(part1)
+    part2 = sorted(part2)
+
+    return part1, part2
 
 def derive_partitions_multiple(queries, plan_costs, savings_matrix, num_partitioning_phases, solver_settings, data_path):
       
@@ -250,12 +267,15 @@ def derive_partitions_multiple(queries, plan_costs, savings_matrix, num_partitio
     partitions_for_depth[0] = [np.arange(num_queries).tolist()]
 
     part_qubo_new_start = time.time()
-    part_qubo_matrix, query_graph, savings_coeffs = get_partitioning_QUBO(queries, plan_costs, savings_matrix)
+    part_qubo_matrix, query_graph, coefficients = get_partitioning_QUBO(queries, plan_costs, savings_matrix, solver_settings)
     
     total_time_in_s = time.time() - start_time
 
     times_for_depth = {}
     for i in range(num_partitioning_phases):
+        unpartitioned_queries = []
+        for partition in partitions_for_depth[i]:
+            unpartitioned_queries.extend(partition)
         partitions_for_depth[i+1] = []
         times_for_depth[i] = []
         partition_counter = 0
@@ -266,29 +286,40 @@ def derive_partitions_multiple(queries, plan_costs, savings_matrix, num_partitio
                 p_part_qubo_matrix = part_qubo_matrix
             else:
                 parse_start_time = time.time()
+                p_part_qubo_matrix = parse_query_graph_for_partition(part_qubo_matrix, partition, unpartitioned_queries, coefficients, query_graph)
                 
-                p_part_qubo_matrix = parse_query_graph_for_partition(part_qubo_matrix, partition, savings_coeffs, query_graph)
                 
             generate_partitioning_encoding_with_qubo_matrix_start = time.time()
+            
             qubo = generate_partitioning_encoding_with_qubo_matrix(p_part_qubo_matrix, solver_settings)
 
             p_total_time_in_s = time.time() - start_time
 
             result, opt_time_in_s = solve(qubo, solver_settings, solver_settings["part_time_limit_sec"], data_path, 'partitioning_response_' + str(i) + '_' + str(partition_counter))
             partition_counter = partition_counter + 1
-            
+
             p_total_time_in_s = p_total_time_in_s + opt_time_in_s
         
-            best_p1, best_p2, processing_time_in_s = process_partitioning_qubo_results(query_graph, result)
+            best_p1, best_p2, processing_time_in_s = process_partitioning_qubo_results(query_graph, result) 
+            
             p_total_time_in_s = p_total_time_in_s + processing_time_in_s
-        
+                    
             start_time = time.time()
             best_p1 = [partition[x] for x in best_p1]
             best_p2 = [partition[x] for x in best_p2]
+            
+            pp1_p1, pp1_p2 = postprocess_partitioning_solutions(best_p1.copy(), best_p2.copy(), query_graph)
+            pp2_p1, pp2_p2 = postprocess_partitioning_solutions(best_p2.copy(), best_p1.copy(), query_graph)
+            pp1_split_weight = get_split_weight(query_graph, pp1_p1, pp1_p2)
+            pp2_split_weight = get_split_weight(query_graph, pp2_p1, pp2_p2)
+            
+            if pp1_split_weight < pp2_split_weight:     
+                partitions_for_depth[i+1].append(pp1_p1)
+                partitions_for_depth[i+1].append(pp1_p2)
+            else:
+                partitions_for_depth[i+1].append(pp2_p1)
+                partitions_for_depth[i+1].append(pp2_p2)  
 
-            partitions_for_depth[i+1].append(best_p1)
-            partitions_for_depth[i+1].append(best_p2)
-           
             p_total_time_in_s = p_total_time_in_s + (time.time() - start_time)
             times_for_depth[i].append(p_total_time_in_s)
         total_time_in_s = total_time_in_s + max(times_for_depth[i])
@@ -333,7 +364,6 @@ def process_partition(partition, int_solution, queries, plan_costs, savings_matr
     plan_counter = 0
     p_plan_idx_to_og_plan_ind = {}
     og_plan_idx_to_p_plan_idx = {}
-    # Fetch and track partition queries and plan costs
     fetch_partition_queries_start = time.time()
     for q in partition:
         q_plans = queries[str(q)]
@@ -348,6 +378,7 @@ def process_partition(partition, int_solution, queries, plan_costs, savings_matr
         query_counter += 1
 
     num_p_plans = len(p_plans)
+
     fetch_partition_savings_start = time.time()
 
     epsilon = 0.25
@@ -358,7 +389,7 @@ def process_partition(partition, int_solution, queries, plan_costs, savings_matr
     del_indices = [x for x in del_indices if x not in p_plans]
     p_savings_matrix = np.delete(p_savings_matrix, del_indices, axis=0)
     p_savings_matrix = np.delete(p_savings_matrix, del_indices, axis=1)
-    
+  
     wm = wl + max(np.sum(p_savings_matrix, axis=1))
 
     p_savings_matrix = np.multiply(p_savings_matrix, -1)
@@ -366,6 +397,7 @@ def process_partition(partition, int_solution, queries, plan_costs, savings_matr
     mqo_encoding_start = time.time()
     
     mqo_encoding = generate_MQO_encoding_with_matrix(p_queries, p_plan_costs, p_savings_matrix, wl, wm, solver_settings)
+    
 
     total_time_in_s = time.time() - start_time
     
@@ -381,9 +413,9 @@ def process_partition(partition, int_solution, queries, plan_costs, savings_matr
         if not is_solution_valid(p_active_plans, p_queries):
             p_active_plans = postprocess_MQO_solution(p_active_plans, p_plan_costs, p_savings_matrix, len(p_queries.keys()), num_plans_per_query)
         solution_configurations.append(p_active_plans)
-    
+
     total_time_in_s = total_time_in_s + (time.time() - start_time)
-    
+
     return solution_configurations, p_plan_idx_to_og_plan_ind, total_time_in_s
 
 def solution_to_bitstring(solution, solver_settings):
@@ -392,10 +424,6 @@ def solution_to_bitstring(solution, solver_settings):
     elif solver_settings["solver"] == "SA":
         return solution[0]
     elif solver_settings["solver"] == "DWave_Hybrid":
-        return solution[0]
-    elif solver_settings["solver"] == "SQA": 
-        return solution[0]
-    elif solver_settings["solver"] == "VA":
         return solution[0]
     return
     
@@ -433,6 +461,7 @@ def get_active_savings(active_plans, savings):
 
 
 def process_single_partition(queries, plan_costs, savings_matrix, og_savings, num_plans_per_query, num_og_plans, solver_settings, data_path):
+
     total_time_in_s = None
     num_queries = len(queries.keys())
     start_time = time.time()
@@ -447,6 +476,7 @@ def process_single_partition(queries, plan_costs, savings_matrix, og_savings, nu
     total_time_in_s = time.time() - start_time
         
     solutions, opt_time_in_s = solve(mqo_encoding, solver_settings, solver_settings["time_limit_sec"], data_path, 'mqo_response')
+
     total_time_in_s = total_time_in_s + opt_time_in_s
            
     start_time = time.time()
@@ -480,6 +510,7 @@ def process_multiple_partitions(queries, plan_costs, savings_matrix, og_savings,
 
     num_partitioning_phases = solver_settings["num_partitioning_phases"]
     partitions, processing_time_in_s = derive_partitions_multiple(queries, plan_costs, savings_matrix, num_partitioning_phases, solver_settings, data_path)
+
     total_time_in_s = processing_time_in_s
 
     global_solution = []
@@ -542,15 +573,16 @@ def postprocess_MQO_solution(raw_plan_selections, plan_costs, savings, num_queri
     plan_selections = sorted(plan_selections)
     return plan_selections
        
+    
 def conduct_experiment_internal(queries, plan_costs, savings_matrix, num_plans_per_query, num_og_plans, solver_settings, data_path, result_path):
     total_time_in_s = None
     start_time = time.time()
     
     num_queries = len(queries)
     num_plans = len(plan_costs)
-    
+   
     og_savings = savings_matrix.copy()
-        
+
     total_time_in_s = time.time() - start_time
     num_partitioning_phases = solver_settings["num_partitioning_phases"]
     if num_partitioning_phases > 0:
@@ -559,15 +591,9 @@ def conduct_experiment_internal(queries, plan_costs, savings_matrix, num_plans_p
         global_plan_configuration, global_costs, processing_time_in_s = process_single_partition(queries, plan_costs, savings_matrix, og_savings, num_plans_per_query, num_og_plans, solver_settings, data_path)
     total_time_in_s = total_time_in_s + processing_time_in_s
     
-    print("Global configuration:")
-    print(global_plan_configuration)
-    print("Is global configuration valid:")
-    print(is_solution_valid(global_plan_configuration, queries))
-    
     global_costs = evaluate_mqo_solution(global_plan_configuration, plan_costs, og_savings, num_og_plans)
     
-    print("Total costs: " + str(global_costs) + " obtained after " + str(total_time_in_s) + "s")
-    
+    global_costs = int(global_costs)
     export_result(global_plan_configuration, global_costs, total_time_in_s, solver_settings, result_path)
 
 
@@ -582,6 +608,7 @@ def is_solution_valid(plan_configuration, queries):
             return False
     return True
 
+
 def get_data_path_for_settings(solver_settings, benchmark, num_queries, num_plans_per_query, problem, data_path_prefix):
     if solver_settings["solver"] == "DA":
         return data_path_prefix + '/DA/' + benchmark + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/prob_' + str(problem) + '/npart_' + str(solver_settings["num_partitioning_phases"]) + '/time_limit_' + str(solver_settings["time_limit_sec"]) 
@@ -589,35 +616,76 @@ def get_data_path_for_settings(solver_settings, benchmark, num_queries, num_plan
         return data_path_prefix + '/SA/' + benchmark + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/prob_' + str(problem) + '/npart_' + str(solver_settings["num_partitioning_phases"]) + '/' + str(solver_settings["number_iterations"]) + '_iterations' 
     if solver_settings["solver"] == "DWave_Hybrid":
         return data_path_prefix + '/DWave_Hybrid/' + benchmark + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/prob_' + str(problem) + '/npart_' + str(solver_settings["num_partitioning_phases"]) + '/time_limit_' + str(solver_settings["time_limit"]) 
-    if solver_settings["solver"] == "SQA":
-        return data_path_prefix + '/SQA/' + benchmark + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/prob_' + str(problem) + '/npart_' + str(solver_settings["num_partitioning_phases"]) + '/' + str(solver_settings["n_steps"]) + '_iterations'
-    if solver_settings["solver"] == "VA":
-        return data_path_prefix + '/VA/' + benchmark + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/prob_' + str(problem) + '/npart_' + str(solver_settings["num_partitioning_phases"]) + '/' + 'vector_mode_' + str(solver_settings["vector_mode"]) + '/' + str(solver_settings["num_sweeps"]) + '_iterations'
     else:
         return ""
         
-def conduct_experiments(benchmark_list, num_queries_list, num_plans_per_query_list, problems_list, solver_settings_list, problem_path_prefix, data_path_prefix, result_path_prefix):
-     for benchmark in benchmark_list:
+def get_community_data_path_for_settings(solver_settings, num_queries, num_plans_per_query, num_communities, density_in_min, density_in_max, density_out, cost_domain_bound, savings_domain_bound, problem, data_path_prefix):
+    if solver_settings["solver"] == "DA":
+        return data_path_prefix + '/DA/' + str(num_queries) + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/' + str(num_communities) + '_c/us/d_in_min_' + str(density_in_min) + '/d_in_max_' + str(density_in_max) + '/d_out_' + str(density_out) + '/cd_' + str(cost_domain_bound) + '/sd_' + str(savings_domain_bound) + '/p_' + str(problem) + '/npart_' + str(solver_settings["num_partitioning_phases"]) + '/time_limit_' + str(solver_settings["time_limit_sec"]) 
+    if solver_settings["solver"] == "SA":
+        return data_path_prefix + '/SA/' + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/' + str(num_communities) + '_c/us/d_in_min_' + str(density_in_min) + '/d_in_max_' + str(density_in_max) + '/cd_' + str(cost_domain_bound) + '/sd_' + str(savings_domain_bound) + '/p_' + str(problem) + '/npart_' + str(solver_settings["num_partitioning_phases"]) + '/' + str(solver_settings["number_iterations"]) + '_iterations' 
+    if solver_settings["solver"] == "DWave_Hybrid":
+        return data_path_prefix + '/DWave_Hybrid/' + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/' + str(num_communities) + '_c/us/d_in_min_' + str(density_in_min) + '/d_in_max_' + str(density_in_max) + '/cd_' + str(cost_domain_bound) + '/sd_' + str(savings_domain_bound) + '/p_' + str(problem) + '/npart_' + str(solver_settings["num_partitioning_phases"])
+    else:
+        return ""
+ 
+
+def conduct_benchmark_experiments(benchmarks_list, num_queries_list, num_plans_per_query_list, problems_list, solver_settings_list, problem_path_prefix, data_path_prefix, result_path_prefix):
+    for benchmark in benchmarks_list:
         for num_queries in num_queries_list:
             for num_plans_per_query in num_plans_per_query_list:
                 num_og_plans = int(num_queries * num_plans_per_query)
                 for problem in problems_list:
-                    problem_path = problem_path_prefix + '/' + benchmark + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/p_' + str(problem)
-    
+                    
+                    problem_path = problem_path_prefix + '/' + benchmark + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/p_' + str(problem) 
+                    
                     queries = DataUtil.load_compressed_data(problem_path, 'queries.txt')
                     plan_costs = DataUtil.load_compressed_data(problem_path, 'plan_costs.txt') 
                     savings_matrix = DataUtil.load_compressed_data(problem_path, 'savings.txt')
-                    savings_matrix = np.array(savings_matrix)
-                    
+                                        
+                    savings_matrix = np.array(savings_matrix, dtype=int)
+                                        
                     for solver_settings in solver_settings_list:
-                    
+                                        
                         data_path = get_data_path_for_settings(solver_settings, benchmark, num_queries, num_plans_per_query, problem, data_path_prefix)
-                        result_path = result_path_prefix + '/' + benchmark + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/prob_' + str(problem)
+                        result_path = result_path_prefix + '/' + benchmark + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/p_' + str(problem) 
                         if check_if_result_exists(solver_settings, result_path):
                             print("Configuration already processed. Skip.")
                             continue
-                                     
+                                                         
                         conduct_experiment_internal(queries.copy(), plan_costs.copy(), savings_matrix.copy(), num_plans_per_query, num_og_plans, solver_settings, data_path, result_path)
+ 
+
+def conduct_parameter_sweep_experiments(num_queries_list, num_plans_per_query_list, community_configuration_list, density_in_list, density_out_list, cost_domain_bound_list, savings_domain_bound_list, problems_list, solver_settings_list, problem_path_prefix, data_path_prefix, result_path_prefix, enforce_identical_community_sizes=False):
+    for num_queries in num_queries_list:
+        for num_plans_per_query in num_plans_per_query_list:
+            num_og_plans = int(num_queries * num_plans_per_query)
+            for num_communities in community_configuration_list:
+                for (density_in_min, density_in_max) in density_in_list:
+                    for density_out in density_out_list:
+                        for cost_domain_bound in cost_domain_bound_list:
+                            for savings_domain_bound in savings_domain_bound_list:
+                                for problem in problems_list:
+                                    if enforce_identical_community_sizes:
+                                        problem_path = problem_path_prefix + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/' + str(num_communities) + '_c/d_in_min_' + str(density_in_min) + '/d_in_max_' + str(density_in_max) + '/d_out_' + str(density_out) + '/cd_' + str(cost_domain_bound) + '/sd_' + str(savings_domain_bound) + '/p_' + str(problem)
+                                    else:
+                                        problem_path = problem_path_prefix + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/' + str(num_communities) + '_c_us/d_in_min_' + str(density_in_min) + '/d_in_max_' + str(density_in_max) + '/d_out_' + str(density_out) + '/cd_' + str(cost_domain_bound) + '/sd_' + str(savings_domain_bound) + '/p_' + str(problem)
+
+                                    queries = DataUtil.load_compressed_data(problem_path, 'queries.txt')
+                                    plan_costs = DataUtil.load_compressed_data(problem_path, 'plan_costs.txt') 
+                                    savings_matrix = DataUtil.load_compressed_data(problem_path, 'savings.txt')
+                                        
+                                    savings_matrix = np.array(savings_matrix, dtype=int)
+                                        
+                                    for solver_settings in solver_settings_list:
+                                        
+                                        data_path = get_community_data_path_for_settings(solver_settings, num_queries, num_plans_per_query, num_communities, density_in_min, density_in_max, density_out, cost_domain_bound, savings_domain_bound, problem, data_path_prefix)
+                                        result_path = result_path_prefix + '/' + str(num_queries) + '_q/' + str(num_plans_per_query) + '_ppq/' + str(num_communities) + '_c/us/d_in_min_' + str(density_in_min) + '/d_in_max_' + str(density_in_max) + '/d_out_' + str(density_out) + '/cd_' + str(cost_domain_bound) + '/sd_' + str(savings_domain_bound) + '/p_' + str(problem)
+                                        if check_if_result_exists(solver_settings, result_path):
+                                            print("Configuration already processed. Skip.")
+                                            continue
+                                                         
+                                        conduct_experiment_internal(queries.copy(), plan_costs.copy(), savings_matrix.copy(), num_plans_per_query, num_og_plans, solver_settings, data_path, result_path)
 
 
 def main():
@@ -626,26 +694,55 @@ def main():
     qubo_blob_name = "qubo_job"
     prolog_filename = "prolog.json"
     prolog_blob_name = "prolog"
-        
-    problem_configurations = [(500, 30, 0, 0.5)]
-    problems_list = np.arange(5).tolist()
-    benchmark_list = [('job')]
-    for problem_configuration in problem_configurations:
-        for problem in problems_list:
-            problem_path_prefix = 'ExperimentalAnalysis/Problems'
-            data_path_prefix = 'ExperimentalAnalysis/Data'
-            result_path_prefix = 'ExperimentalAnalysis/Results'
-                   
-            sample_list = np.arange(1).tolist()
-
-            solver_settings_list = [{'solver': "DA", 'time_limit_sec': 20, 'num_solution': 16, 'num_group': 1, 'timeout': 60, 'num_partitioning_phases': 0, 'qubo_filename': qubo_filename, 'qubo_blob_name': qubo_blob_name, 'prolog_filename': prolog_filename, 'prolog_blob_name': prolog_blob_name},
-                                    {'solver': "DA", 'time_limit_sec': 10, 'part_time_limit_sec': 10, 'num_solution': 16, 'num_group': 1, 'timeout': 60, 'num_partitioning_phases': 1, 'qubo_filename': qubo_filename, 'qubo_blob_name': qubo_blob_name, 'prolog_filename': prolog_filename, 'prolog_blob_name': prolog_blob_name},
-                                    {'solver': "DA", 'time_limit_sec': 5, 'part_time_limit_sec': 5, 'num_solution': 16, 'num_group': 1, 'timeout': 60, 'num_partitioning_phases': 2, 'qubo_filename': qubo_filename, 'qubo_blob_name': qubo_blob_name, 'prolog_filename': prolog_filename, 'prolog_blob_name': prolog_blob_name}]
     
-            conduct_experiments(benchmark_list, [problem_configuration[0]], [problem_configuration[1]], [problem], solver_settings_list, problem_path_prefix, data_path_prefix, result_path_prefix)
+    problem_path_prefix = 'ExperimentalAnalysis/CommunityProblems'
+    data_path_prefix = 'ExperimentalAnalysisHT1/Data'
+    result_path_prefix = 'ExperimentalAnalysisHT1/Results'
+    
+    solver_settings_list = [{'solver': "DA", 'time_limit_sec': 20, 'part_time_limit_sec': 20, 'num_solution': 16, 'num_group': 1, 'timeout': 60, 'num_partitioning_phases': 0, 'qubo_filename': qubo_filename, 'qubo_blob_name': qubo_blob_name, 'prolog_filename': prolog_filename, 'prolog_blob_name': prolog_blob_name},
+                            {'solver': "DA", 'time_limit_sec': 10, 'part_time_limit_sec': 10, 'num_solution': 16, 'num_group': 1, 'timeout': 60, 'num_partitioning_phases': 1, 'processing_mode': 'incremental', 'qubo_filename': qubo_filename, 'qubo_blob_name': qubo_blob_name, 'prolog_filename': prolog_filename, 'prolog_blob_name': prolog_blob_name},
+                            {'solver': "DA", 'time_limit_sec': 5, 'part_time_limit_sec': 5, 'num_solution': 16, 'num_group': 1, 'timeout': 60, 'num_partitioning_phases': 2, 'processing_mode': 'incremental', 'qubo_filename': qubo_filename, 'qubo_blob_name': qubo_blob_name, 'prolog_filename': prolog_filename, 'prolog_blob_name': prolog_blob_name}]
+    
+    
+    num_queries_list = [250, 500, 750, 1000]
+    num_plans_per_query_list = [20, 30, 40]
+    community_configurations_list = [4]
 
-# In[ ]:
+    density_in_list = [(0.05, 1)] 
+    density_out_list = [0.05]
+    cost_domain_bound_list = [20]
+    savings_domain_bound_list = [10]
+    problems_list = [0, 1, 2]
+
+    conduct_parameter_sweep_experiments(num_queries_list, num_plans_per_query_list, community_configurations_list, density_in_list, density_out_list, cost_domain_bound_list, savings_domain_bound_list, problems_list, solver_settings_list, problem_path_prefix, data_path_prefix, result_path_prefix)
+
+    num_queries_list = [250, 500, 750, 1000]
+    num_plans_per_query_list = [30]
+    community_configurations_list = [1, 2, 6, 10]
+
+    density_in_list = [(0.05, 1)] 
+    density_out_list = [0.05]
+    cost_domain_bound_list = [20]
+    savings_domain_bound_list = [10]
+    problems_list = [0, 1, 2]
+    
+    conduct_parameter_sweep_experiments(num_queries_list, num_plans_per_query_list, community_configurations_list, density_in_list, density_out_list, cost_domain_bound_list, savings_domain_bound_list, problems_list, solver_settings_list, problem_path_prefix, data_path_prefix, result_path_prefix)
+
+    num_queries_list = [250, 500, 750, 1000]
+    num_plans_per_query_list = [30]
+    community_configurations_list = [4]
+
+    density_in_list = [(0.05, 0.25), (0.05, 0.5), (0.05, 0.75)] 
+    density_out_list = [0.05]
+    cost_domain_bound_list = [20]
+    savings_domain_bound_list = [10]
+    problems_list = [0, 1, 2]
+    
+    conduct_parameter_sweep_experiments(num_queries_list, num_plans_per_query_list, community_configurations_list, density_in_list, density_out_list, cost_domain_bound_list, savings_domain_bound_list, problems_list, solver_settings_list, problem_path_prefix, data_path_prefix, result_path_prefix)
+
+
 
 if __name__ == "__main__":
     main()
+
 
